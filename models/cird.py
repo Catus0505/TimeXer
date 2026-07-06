@@ -24,6 +24,12 @@ class Model(nn.Module):
         self.patch_len = configs.patch_len
         self.num_need_slots = getattr(configs, "num_need_slots", 4)
         self.need_eps = getattr(configs, "need_eps", 1e-6)
+        self.need_dim = (
+            getattr(configs, "need_dim", None) or configs.d_model
+        )
+        self.q_dim = (
+            getattr(configs, "q_dim", None) or configs.d_model
+        )
 
         if self.patch_len > self.seq_len:
             raise ValueError(
@@ -33,6 +39,10 @@ class Model(nn.Module):
             raise ValueError("num_need_slots must be positive for cird.")
         if self.need_eps < 0:
             raise ValueError("need_eps must be non-negative for cird.")
+        if self.need_dim <= 0:
+            raise ValueError("need_dim must be positive for cird.")
+        if self.q_dim <= 0:
+            raise ValueError("q_dim must be positive for cird.")
         if self.pred_len % self.num_need_slots != 0:
             raise ValueError(
                 "pred_len must be divisible by num_need_slots for cird."
@@ -72,8 +82,11 @@ class Model(nn.Module):
             dropout=configs.dropout,
         )
         self.need_net = NeedNet(
+            self.seq_len,
             configs.d_model * (self.patch_num + 1),
-            configs.d_model,
+            self.pred_len,
+            self.need_dim,
+            self.q_dim,
             self.num_need_slots,
             need_eps=self.need_eps,
         )
@@ -140,9 +153,17 @@ class Model(nn.Module):
         prediction = y_ci
 
         if return_aux:
-            need_variance = self.need_net(ci_features)
+            x_history = self._select_ci_input(x_enc).permute(
+                0, 2, 1
+            )
+            q_need, need_variance = self.need_net(
+                x_history,
+                ci_features,
+                y_ci,
+            )
             return prediction, {
                 "ci_prediction": y_ci,
+                "q_need": q_need,
                 "need_variance": need_variance,
             }
         return prediction

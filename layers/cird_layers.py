@@ -110,27 +110,63 @@ class CIEncoder(nn.Module):
 
 
 class NeedNet(nn.Module):
-    """Predict horizon-slot residual variance from channel-local CI features."""
+    """Build residual-need queries from channel-local CI information."""
 
     def __init__(
         self,
-        n_features,
-        hidden_dim,
+        seq_len,
+        ci_feature_dim,
+        pred_len,
+        need_dim,
+        q_dim,
         num_need_slots,
         need_eps=1e-6,
     ):
         super().__init__()
+        self.num_need_slots = num_need_slots
+        self.q_dim = q_dim
         self.need_eps = need_eps
-        self.network = nn.Sequential(
-            nn.Flatten(start_dim=2),
-            nn.Linear(n_features, hidden_dim),
+        self.x_encoder = nn.Sequential(
+            nn.Linear(seq_len, need_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, num_need_slots),
+        )
+        self.h_encoder = nn.Sequential(
+            nn.Flatten(start_dim=2),
+            nn.Linear(ci_feature_dim, need_dim),
+            nn.GELU(),
+        )
+        self.y_encoder = nn.Sequential(
+            nn.Linear(pred_len, need_dim),
+            nn.GELU(),
+        )
+        self.fusion = nn.Sequential(
+            nn.Linear(3 * need_dim, need_dim),
+            nn.GELU(),
+            nn.Linear(need_dim, num_need_slots * q_dim),
+        )
+        self.variance_head = nn.Linear(q_dim, 1)
+
+    def forward(self, x_history, ci_features, y_ci):
+        # Every projection operates independently on each channel.
+        x_summary = self.x_encoder(x_history)
+        h_summary = self.h_encoder(ci_features.detach())
+        y_summary = self.y_encoder(
+            y_ci.detach().permute(0, 2, 1)
         )
 
-    def forward(self, ci_features):
-        raw_sigma2 = self.network(ci_features.detach())
-        return F.softplus(raw_sigma2) + self.need_eps
+        fused_summary = torch.cat(
+            [x_summary, h_summary, y_summary],
+            dim=-1,
+        )
+        q_need = self.fusion(fused_summary).reshape(
+            fused_summary.shape[0],
+            fused_summary.shape[1],
+            self.num_need_slots,
+            self.q_dim,
+        )
+        raw_sigma2 = self.variance_head(q_need).squeeze(-1)
+        need_variance = F.softplus(raw_sigma2) + self.need_eps
+        return q_need, need_variance
 
 
 class FlattenHead(nn.Module):

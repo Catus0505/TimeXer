@@ -143,8 +143,12 @@ if __name__ == '__main__':
     parser.add_argument('--num_need_slots', type=int, default=4, help='number of horizon residual need slots')
     parser.add_argument('--need_loss_weight', type=float, default=0.0, help='weight of residual need loss')
     parser.add_argument('--need_eps', type=float, default=1e-6, help='epsilon for residual need variance')
+    parser.add_argument('--need_dim', type=int, default=None, help='NeedNet summary dimension; defaults to d_model')
+    parser.add_argument('--q_dim', type=int, default=None, help='residual need query dimension; defaults to d_model')
 
     args = parser.parse_args()
+    args.need_dim = args.d_model if args.need_dim is None else args.need_dim
+    args.q_dim = args.d_model if args.q_dim is None else args.q_dim
     # args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
     args.use_gpu = True if torch.cuda.is_available() else False
 
