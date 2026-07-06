@@ -145,10 +145,36 @@ if __name__ == '__main__':
     parser.add_argument('--need_eps', type=float, default=1e-6, help='epsilon for residual need variance')
     parser.add_argument('--need_dim', type=int, default=None, help='NeedNet summary dimension; defaults to d_model')
     parser.add_argument('--q_dim', type=int, default=None, help='residual need query dimension; defaults to d_model')
+    parser.add_argument('--context_rank', type=int, default=4, help='number of compressed CD context tokens')
+    parser.add_argument('--cd_dim', type=int, default=None, help='Residual-CD latent dimension; defaults to d_model')
+    parser.add_argument('--cd_dropout', type=float, default=0.1, help='dropout used by the Residual-CD branch')
+    parser.add_argument('--attention_temperature', type=float, default=1.0, help='temperature for need-supply matching')
+    parser.add_argument('--null_supply', type=int, default=1, help='whether to include the zero-valued null supply')
+    parser.add_argument('--value_adapter_rank', type=int, default=16, help='rank of each slot-specific value adapter')
+    parser.add_argument('--cd_init_scale', type=float, default=0.1, help='initial scale applied to the CD residual')
 
     args = parser.parse_args()
     args.need_dim = args.d_model if args.need_dim is None else args.need_dim
     args.q_dim = args.d_model if args.q_dim is None else args.q_dim
+    args.cd_dim = args.d_model if args.cd_dim is None else args.cd_dim
+    if args.context_rank <= 0:
+        parser.error('--context_rank must be positive')
+    if args.cd_dim <= 0:
+        parser.error('--cd_dim must be positive')
+    if args.n_heads <= 0:
+        parser.error('--n_heads must be positive')
+    if args.cd_dim % args.n_heads != 0:
+        parser.error('--cd_dim must be divisible by --n_heads')
+    if not 0.0 <= args.cd_dropout < 1.0:
+        parser.error('--cd_dropout must be in [0, 1)')
+    if args.attention_temperature <= 0:
+        parser.error('--attention_temperature must be positive')
+    if args.null_supply not in {0, 1}:
+        parser.error('--null_supply must be 0 or 1')
+    if args.value_adapter_rank <= 0:
+        parser.error('--value_adapter_rank must be positive')
+    if args.cd_init_scale < 0:
+        parser.error('--cd_init_scale must be non-negative')
     # args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
     args.use_gpu = True if torch.cuda.is_available() else False
 

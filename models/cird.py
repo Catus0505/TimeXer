@@ -8,11 +8,12 @@ from layers.cird_layers import (
     CIEncoderLayer,
     FlattenHead,
     NeedNet,
+    ResidualCDBranch,
 )
 
 
 class Model(nn.Module):
-    """Channel-independent forecasting baseline for CIRD."""
+    """CIRD with isolated CI and residual channel-dependent paths."""
 
     def __init__(self, configs):
         super().__init__()
@@ -29,6 +30,27 @@ class Model(nn.Module):
         )
         self.q_dim = (
             getattr(configs, "q_dim", None) or configs.d_model
+        )
+        self.cd_dim = (
+            getattr(configs, "cd_dim", None) or configs.d_model
+        )
+        self.context_rank = getattr(configs, "context_rank", 4)
+        self.cd_dropout = getattr(configs, "cd_dropout", 0.1)
+        self.attention_temperature = getattr(
+            configs,
+            "attention_temperature",
+            1.0,
+        )
+        self.null_supply = getattr(configs, "null_supply", 1)
+        self.value_adapter_rank = getattr(
+            configs,
+            "value_adapter_rank",
+            16,
+        )
+        self.cd_init_scale = getattr(
+            configs,
+            "cd_init_scale",
+            0.1,
         )
 
         if self.patch_len > self.seq_len:
@@ -88,6 +110,22 @@ class Model(nn.Module):
             self.need_dim,
             self.q_dim,
             self.num_need_slots,
+            need_eps=self.need_eps,
+        )
+        self.cd_branch = ResidualCDBranch(
+            seq_len=self.seq_len,
+            patch_len=self.patch_len,
+            pred_len=self.pred_len,
+            num_need_slots=self.num_need_slots,
+            q_dim=self.q_dim,
+            cd_dim=self.cd_dim,
+            n_heads=configs.n_heads,
+            context_rank=self.context_rank,
+            dropout=self.cd_dropout,
+            attention_temperature=self.attention_temperature,
+            null_supply=self.null_supply,
+            value_adapter_rank=self.value_adapter_rank,
+            cd_init_scale=self.cd_init_scale,
             need_eps=self.need_eps,
         )
 
@@ -150,20 +188,28 @@ class Model(nn.Module):
             return None
 
         y_ci, ci_features = self.forecast_ci(x_enc)
-        prediction = y_ci
+        x_history = self._select_ci_input(x_enc).permute(
+            0, 2, 1
+        )
+        q_need, need_variance = self.need_net(
+            x_history,
+            ci_features,
+            y_ci,
+        )
+        delta_cd, cd_aux = self.cd_branch(
+            x_history,
+            q_need,
+            need_variance,
+        )
+        prediction = y_ci.detach() + delta_cd
 
         if return_aux:
-            x_history = self._select_ci_input(x_enc).permute(
-                0, 2, 1
-            )
-            q_need, need_variance = self.need_net(
-                x_history,
-                ci_features,
-                y_ci,
-            )
             return prediction, {
                 "ci_prediction": y_ci,
                 "q_need": q_need,
                 "need_variance": need_variance,
+                "cd_residual": delta_cd,
+                "cd_attention": cd_aux["cd_attention"],
+                "null_attention": cd_aux["null_attention"],
             }
         return prediction

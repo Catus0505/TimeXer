@@ -146,6 +146,47 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         )
         return forecast_loss + need_loss_weight * need_loss
 
+    def _add_ci_loss(self, forecast_loss, aux, batch_y, f_dim):
+        if (
+            not isinstance(aux, dict)
+            or 'ci_prediction' not in aux
+        ):
+            return forecast_loss
+
+        ci_prediction = aux['ci_prediction'][
+            :, -self.args.pred_len:, f_dim:
+        ]
+        if ci_prediction.shape != batch_y.shape:
+            raise ValueError(
+                "Sliced ci_prediction must have the same shape as "
+                "batch_y."
+            )
+        ci_loss = nn.functional.mse_loss(
+            ci_prediction,
+            batch_y,
+        )
+        return forecast_loss + ci_loss
+
+    def _add_training_losses(
+        self,
+        forecast_loss,
+        aux,
+        batch_y,
+        f_dim,
+    ):
+        loss = self._add_ci_loss(
+            forecast_loss,
+            aux,
+            batch_y,
+            f_dim,
+        )
+        return self._add_need_loss(
+            loss,
+            aux,
+            batch_y,
+            f_dim,
+        )
+
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
         self.model.eval()
@@ -221,9 +262,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 # encoder - decoder
-                request_aux = (
-                    getattr(self.args, 'need_loss_weight', 0.0) > 0
-                )
+                request_aux = self.model_supports_aux
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         model_output = self._forward_model(
@@ -239,7 +278,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         outputs = outputs[:, -self.args.pred_len:, f_dim:]
                         batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
                         forecast_loss = criterion(outputs, batch_y)
-                        loss = self._add_need_loss(
+                        loss = self._add_training_losses(
                             forecast_loss, aux, batch_y, f_dim
                         )
                         train_loss.append(loss.item())
@@ -257,7 +296,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     outputs = outputs[:, -self.args.pred_len:, f_dim:]
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
                     forecast_loss = criterion(outputs, batch_y)
-                    loss = self._add_need_loss(
+                    loss = self._add_training_losses(
                         forecast_loss, aux, batch_y, f_dim
                     )
                     train_loss.append(loss.item())
