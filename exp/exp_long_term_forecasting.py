@@ -5,6 +5,7 @@ from utils.metrics import metric
 import torch
 import torch.nn as nn
 from torch import optim
+import inspect
 import os
 import time
 import warnings
@@ -20,9 +21,63 @@ def unpack_model_output(output):
     return output, None
 
 
+def compute_need_loss(
+    batch_y,
+    ci_prediction,
+    need_variance,
+    num_need_slots,
+    eps,
+):
+    horizon = batch_y.shape[1]
+    if horizon % num_need_slots != 0:
+        raise ValueError(
+            "Prediction horizon must be divisible by num_need_slots."
+        )
+    if ci_prediction.shape != batch_y.shape:
+        raise ValueError(
+            "ci_prediction must have the same shape as batch_y."
+        )
+
+    expected_variance_shape = (
+        batch_y.shape[0],
+        batch_y.shape[2],
+        num_need_slots,
+    )
+    if need_variance.shape != expected_variance_shape:
+        raise ValueError(
+            "need_variance must have shape "
+            f"{expected_variance_shape}, got {tuple(need_variance.shape)}."
+        )
+
+    residual = batch_y - ci_prediction.detach()
+    block_length = horizon // num_need_slots
+    residual_energy = torch.stack(
+        [
+            residual[
+                :,
+                slot * block_length : (slot + 1) * block_length,
+                :,
+            ]
+            .square()
+            .mean(dim=1)
+            for slot in range(num_need_slots)
+        ],
+        dim=-1,
+    )
+    stabilized_variance = need_variance + eps
+    return (
+        residual_energy / stabilized_variance
+        + torch.log(stabilized_variance)
+    ).mean()
+
+
 class Exp_Long_Term_Forecast(Exp_Basic):
     def __init__(self, args):
         super(Exp_Long_Term_Forecast, self).__init__(args)
+        model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+        self.model_supports_aux = (
+            'return_aux' in inspect.signature(model.forward).parameters
+        )
 
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
@@ -42,6 +97,54 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def _select_criterion(self):
         criterion = nn.MSELoss()
         return criterion
+
+    def _forward_model(
+        self,
+        batch_x,
+        batch_x_mark,
+        dec_inp,
+        batch_y_mark,
+        request_aux=False,
+    ):
+        if request_aux and self.model_supports_aux:
+            return self.model(
+                batch_x,
+                batch_x_mark,
+                dec_inp,
+                batch_y_mark,
+                return_aux=True,
+            )
+        return self.model(
+            batch_x,
+            batch_x_mark,
+            dec_inp,
+            batch_y_mark,
+        )
+
+    def _add_need_loss(self, forecast_loss, aux, batch_y, f_dim):
+        need_loss_weight = getattr(
+            self.args, 'need_loss_weight', 0.0
+        )
+        if (
+            need_loss_weight <= 0
+            or not isinstance(aux, dict)
+            or 'ci_prediction' not in aux
+            or 'need_variance' not in aux
+        ):
+            return forecast_loss
+
+        ci_prediction = aux['ci_prediction'][
+            :, -self.args.pred_len:, f_dim:
+        ]
+        need_variance = aux['need_variance'][:, f_dim:, :]
+        need_loss = compute_need_loss(
+            batch_y,
+            ci_prediction,
+            need_variance,
+            getattr(self.args, 'num_need_slots', 4),
+            getattr(self.args, 'need_eps', 1e-6),
+        )
+        return forecast_loss + need_loss_weight * need_loss
 
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
@@ -118,24 +221,45 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 # encoder - decoder
+                request_aux = (
+                    getattr(self.args, 'need_loss_weight', 0.0) > 0
+                )
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        model_output = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                        outputs, _ = unpack_model_output(model_output)
+                        model_output = self._forward_model(
+                            batch_x,
+                            batch_x_mark,
+                            dec_inp,
+                            batch_y_mark,
+                            request_aux=request_aux,
+                        )
+                        outputs, aux = unpack_model_output(model_output)
 
                         f_dim = -1 if self.args.features == 'MS' else 0
                         outputs = outputs[:, -self.args.pred_len:, f_dim:]
                         batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                        loss = criterion(outputs, batch_y)
+                        forecast_loss = criterion(outputs, batch_y)
+                        loss = self._add_need_loss(
+                            forecast_loss, aux, batch_y, f_dim
+                        )
                         train_loss.append(loss.item())
                 else:
-                    model_output = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                    outputs, _ = unpack_model_output(model_output)
+                    model_output = self._forward_model(
+                        batch_x,
+                        batch_x_mark,
+                        dec_inp,
+                        batch_y_mark,
+                        request_aux=request_aux,
+                    )
+                    outputs, aux = unpack_model_output(model_output)
 
                     f_dim = -1 if self.args.features == 'MS' else 0
                     outputs = outputs[:, -self.args.pred_len:, f_dim:]
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                    loss = criterion(outputs, batch_y)
+                    forecast_loss = criterion(outputs, batch_y)
+                    loss = self._add_need_loss(
+                        forecast_loss, aux, batch_y, f_dim
+                    )
                     train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:

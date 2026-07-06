@@ -7,6 +7,7 @@ from layers.cird_layers import (
     CIEncoder,
     CIEncoderLayer,
     FlattenHead,
+    NeedNet,
 )
 
 
@@ -21,10 +22,20 @@ class Model(nn.Module):
         self.pred_len = configs.pred_len
         self.use_norm = configs.use_norm
         self.patch_len = configs.patch_len
+        self.num_need_slots = getattr(configs, "num_need_slots", 4)
+        self.need_eps = getattr(configs, "need_eps", 1e-6)
 
         if self.patch_len > self.seq_len:
             raise ValueError(
                 "patch_len must not be greater than seq_len for cird."
+            )
+        if self.num_need_slots <= 0:
+            raise ValueError("num_need_slots must be positive for cird.")
+        if self.need_eps < 0:
+            raise ValueError("need_eps must be non-negative for cird.")
+        if self.pred_len % self.num_need_slots != 0:
+            raise ValueError(
+                "pred_len must be divisible by num_need_slots for cird."
             )
 
         self.patch_num = self.seq_len // self.patch_len
@@ -59,6 +70,12 @@ class Model(nn.Module):
             configs.d_model * (self.patch_num + 1),
             self.pred_len,
             dropout=configs.dropout,
+        )
+        self.need_net = NeedNet(
+            configs.d_model * (self.patch_num + 1),
+            configs.d_model,
+            self.num_need_slots,
+            need_eps=self.need_eps,
         )
 
     def _select_ci_input(self, x_enc):
@@ -102,7 +119,7 @@ class Model(nn.Module):
                 stdev = stdev[:, :, -1:]
             y_ci = y_ci * stdev + means
 
-        return y_ci
+        return y_ci, ci_features
 
     def forward(
         self,
@@ -119,9 +136,13 @@ class Model(nn.Module):
         }:
             return None
 
-        y_ci = self.forecast_ci(x_enc)
-        prediction = y_ci[:, -self.pred_len :, :]
+        y_ci, ci_features = self.forecast_ci(x_enc)
+        prediction = y_ci
 
         if return_aux:
-            return prediction, {"ci_prediction": prediction}
+            need_variance = self.need_net(ci_features)
+            return prediction, {
+                "ci_prediction": y_ci,
+                "need_variance": need_variance,
+            }
         return prediction

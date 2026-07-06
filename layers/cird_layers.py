@@ -109,6 +109,30 @@ class CIEncoder(nn.Module):
         return x
 
 
+class NeedNet(nn.Module):
+    """Predict horizon-slot residual variance from channel-local CI features."""
+
+    def __init__(
+        self,
+        n_features,
+        hidden_dim,
+        num_need_slots,
+        need_eps=1e-6,
+    ):
+        super().__init__()
+        self.need_eps = need_eps
+        self.network = nn.Sequential(
+            nn.Flatten(start_dim=2),
+            nn.Linear(n_features, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, num_need_slots),
+        )
+
+    def forward(self, ci_features):
+        raw_sigma2 = self.network(ci_features.detach())
+        return F.softplus(raw_sigma2) + self.need_eps
+
+
 class FlattenHead(nn.Module):
     """Map each channel's flattened CI representation to its forecast."""
 

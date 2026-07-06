@@ -139,6 +139,11 @@ if __name__ == '__main__':
     # TimeXer
     parser.add_argument('--patch_len', type=int, default=16, help='patch length')
 
+    # CIRD
+    parser.add_argument('--num_need_slots', type=int, default=4, help='number of horizon residual need slots')
+    parser.add_argument('--need_loss_weight', type=float, default=0.0, help='weight of residual need loss')
+    parser.add_argument('--need_eps', type=float, default=1e-6, help='epsilon for residual need variance')
+
     args = parser.parse_args()
     # args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
     args.use_gpu = True if torch.cuda.is_available() else False
