@@ -1,0 +1,22 @@
+
+# datasets
+dataset/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# experiment outputs
+checkpoints/
+results/
+test_results/
+logs/
+runs/
+wandb/
+
+# temporary files
+*.log
+.DS_Store
+.vscode/
+.idea/
